@@ -73,7 +73,7 @@ func (t *Topology) RandomlyReserveOneVolume() (bool, *DataNode, *storage.VolumeI
 		return false, nil, nil
 	}
 	vid := t.NextVolumeId()
-	ret, node := t.ReserveOneVolume(rand.Intn(t.FreeSpace()), vid)
+	ret, node := t.ReserveOneVolume(rand.Intn(t.FreeSpace()), vid) //node.go 77 line
 	return ret, node, &vid
 }
 
@@ -86,7 +86,7 @@ func (t *Topology) RandomlyReserveOneVolumeExcept(except []Node) (bool, *DataNod
 		return false, nil, nil
 	}
 	vid := t.NextVolumeId()
-	ret, node := t.ReserveOneVolume(rand.Intn(freeSpace), vid)
+	ret, node := t.ReserveOneVolume(rand.Intn(freeSpace), vid)	//node.go 77 line
 	return ret, node, &vid
 }
 
