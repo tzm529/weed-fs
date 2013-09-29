@@ -3,9 +3,9 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"code.google.com/p/weed-fs/go/glog"
 	"code.google.com/p/weed-fs/go/storage"
 	"fmt"
-	"log"
 	"os"
 	"path"
 	"strconv"
@@ -67,7 +67,7 @@ func runExport(cmd *Command, args []string) bool {
 			fh = os.Stdout
 		} else {
 			if fh, err = os.Create(*dest); err != nil {
-				log.Fatalf("cannot open output tar %s: %s", *dest, err)
+				glog.Fatalf("cannot open output tar %s: %s", *dest, err)
 			}
 		}
 		defer fh.Close()
@@ -84,13 +84,13 @@ func runExport(cmd *Command, args []string) bool {
 	vid := storage.VolumeId(*exportVolumeId)
 	indexFile, err := os.OpenFile(path.Join(*exportVolumePath, fileName+".idx"), os.O_RDONLY, 0644)
 	if err != nil {
-		log.Fatalf("Create Volume Index [ERROR] %s\n", err)
+		glog.Fatalf("Create Volume Index [ERROR] %s\n", err)
 	}
 	defer indexFile.Close()
 
 	nm, err := storage.LoadNeedleMap(indexFile)
 	if err != nil {
-		log.Fatalf("cannot load needle map from %s: %s", indexFile, err)
+		glog.Fatalf("cannot load needle map from %s: %s", indexFile, err)
 	}
 
 	var version storage.Version
@@ -98,7 +98,7 @@ func runExport(cmd *Command, args []string) bool {
 	err = storage.ScanVolumeFile(*exportVolumePath, vid, func(superBlock storage.SuperBlock) error {
 		version = superBlock.Version
 		return nil
-	}, func(n *storage.Needle, offset uint32) error {
+	}, func(n *storage.Needle, offset int64) error {
 		debug("key", n.Id, "offset", offset, "size", n.Size, "disk_size", n.DiskSize(), "gzip", n.IsGzipped())
 		nv, ok := nm.Get(n.Id)
 		if ok && nv.Size > 0 {
@@ -113,7 +113,7 @@ func runExport(cmd *Command, args []string) bool {
 		return nil
 	})
 	if err != nil {
-		log.Fatalf("Export Volume File [ERROR] %s\n", err)
+		glog.Fatalf("Export Volume File [ERROR] %s\n", err)
 	}
 	return true
 }

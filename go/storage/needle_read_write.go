@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"code.google.com/p/weed-fs/go/glog"
 	"code.google.com/p/weed-fs/go/util"
 	"errors"
 	"fmt"
@@ -9,14 +10,16 @@ import (
 )
 
 const (
-	FlagGzip    = 0x01
-	FlagHasName = 0x02
-	FlagHasMime = 0x04
+	FlagGzip                = 0x01
+	FlagHasName             = 0x02
+	FlagHasMime             = 0x04
+	FlagHasLastModifiedDate = 0x08
+	LastModifiedBytesLength = 5
 )
 
-func (n *Needle) DiskSize() uint32 {
-	padding := NeedlePaddingSize - ((NeedleHeaderSize + n.Size + NeedleChecksumSize) % NeedlePaddingSize)
-	return NeedleHeaderSize + n.Size + padding + NeedleChecksumSize
+func (n *Needle) DiskSize() int64 {
+	padding := NeedlePaddingSize - ((NeedleHeaderSize + int64(n.Size) + NeedleChecksumSize) % NeedlePaddingSize)
+	return NeedleHeaderSize + int64(n.Size) + padding + NeedleChecksumSize
 }
 func (n *Needle) Append(w io.Writer, version Version) (size uint32, err error) {
 	if s, ok := w.(io.Seeker); ok {
@@ -24,12 +27,12 @@ func (n *Needle) Append(w io.Writer, version Version) (size uint32, err error) {
 			defer func(s io.Seeker, off int64) {
 				if err != nil {
 					if _, e = s.Seek(off, 0); e != nil {
-						fmt.Printf("Failed to seek %s back to %d with error: %s\n", w, off, e)
+						glog.V(0).Infof("Failed to seek %s back to %d with error: %s", w, off, e.Error())
 					}
 				}
 			}(s, end)
 		} else {
-			err = fmt.Errorf("Cnnot Read Current Volume Position: %s", e)
+			err = fmt.Errorf("Cnnot Read Current Volume Position: %s", e.Error())
 			return
 		}
 	}
@@ -64,6 +67,9 @@ func (n *Needle) Append(w io.Writer, version Version) (size uint32, err error) {
 			if n.HasMime() {
 				n.Size = n.Size + 1 + uint32(n.MimeSize)
 			}
+			if n.HasLastModifiedDate() {
+				n.Size = n.Size + LastModifiedBytesLength
+			}
 		}
 		size = n.DataSize
 		util.Uint32toBytes(header[12:16], n.Size)
@@ -82,23 +88,29 @@ func (n *Needle) Append(w io.Writer, version Version) (size uint32, err error) {
 			if _, err = w.Write(header[0:1]); err != nil {
 				return
 			}
-		}
-		if n.HasName() {
-			util.Uint8toBytes(header[0:1], n.NameSize)
-			if _, err = w.Write(header[0:1]); err != nil {
-				return
+			if n.HasName() {
+				util.Uint8toBytes(header[0:1], n.NameSize)
+				if _, err = w.Write(header[0:1]); err != nil {
+					return
+				}
+				if _, err = w.Write(n.Name); err != nil {
+					return
+				}
 			}
-			if _, err = w.Write(n.Name); err != nil {
-				return
+			if n.HasMime() {
+				util.Uint8toBytes(header[0:1], n.MimeSize)
+				if _, err = w.Write(header[0:1]); err != nil {
+					return
+				}
+				if _, err = w.Write(n.Mime); err != nil {
+					return
+				}
 			}
-		}
-		if n.HasMime() {
-			util.Uint8toBytes(header[0:1], n.MimeSize)
-			if _, err = w.Write(header[0:1]); err != nil {
-				return
-			}
-			if _, err = w.Write(n.Mime); err != nil {
-				return
+			if n.HasLastModifiedDate() {
+				util.Uint64toBytes(header[0:8], n.LastModified)
+				if _, err = w.Write(header[8-LastModifiedBytesLength : 8]); err != nil {
+					return
+				}
 			}
 		}
 		padding := NeedlePaddingSize - ((NeedleHeaderSize + n.Size + NeedleChecksumSize) % NeedlePaddingSize)
@@ -119,9 +131,11 @@ func (n *Needle) Read(r io.Reader, size uint32, version Version) (ret int, err e
 		n.readNeedleHeader(bytes)
 		n.Data = bytes[NeedleHeaderSize : NeedleHeaderSize+size]
 		checksum := util.BytesToUint32(bytes[NeedleHeaderSize+size : NeedleHeaderSize+size+NeedleChecksumSize])
-		if checksum != NewCRC(n.Data).Value() {
+		newChecksum := NewCRC(n.Data)
+		if checksum != newChecksum.Value() {
 			return 0, errors.New("CRC error! Data On Disk Corrupted!")
 		}
+		n.Checksum = newChecksum
 		return
 	case Version2:
 		if size == 0 {
@@ -140,9 +154,11 @@ func (n *Needle) Read(r io.Reader, size uint32, version Version) (ret int, err e
 		}
 		n.readNeedleDataVersion2(bytes[NeedleHeaderSize : NeedleHeaderSize+int(n.Size)])
 		checksum := util.BytesToUint32(bytes[NeedleHeaderSize+n.Size : NeedleHeaderSize+n.Size+NeedleChecksumSize])
-		if checksum != NewCRC(n.Data).Value() {
+		newChecksum := NewCRC(n.Data)
+		if checksum != newChecksum.Value() {
 			return 0, errors.New("CRC error! Data On Disk Corrupted!")
 		}
+		n.Checksum = newChecksum
 		return
 	}
 	return 0, fmt.Errorf("Unsupported Version! (%d)", version)
@@ -172,6 +188,11 @@ func (n *Needle) readNeedleDataVersion2(bytes []byte) {
 		n.MimeSize = uint8(bytes[index])
 		index = index + 1
 		n.Mime = bytes[index : index+int(n.MimeSize)]
+		index = index + int(n.MimeSize)
+	}
+	if index < lenBytes && n.HasLastModifiedDate() {
+		n.LastModified = util.BytesToUint64(bytes[index : index+LastModifiedBytesLength])
+		index = index + LastModifiedBytesLength
 	}
 }
 
@@ -235,4 +256,10 @@ func (n *Needle) HasMime() bool {
 }
 func (n *Needle) SetHasMime() {
 	n.Flags = n.Flags | FlagHasMime
+}
+func (n *Needle) HasLastModifiedDate() bool {
+	return n.Flags&FlagHasLastModifiedDate > 0
+}
+func (n *Needle) SetHasLastModifiedDate() {
+	n.Flags = n.Flags | FlagHasLastModifiedDate
 }

@@ -1,8 +1,8 @@
 package topology
 
 import (
+	"code.google.com/p/weed-fs/go/glog"
 	"code.google.com/p/weed-fs/go/storage"
-	"fmt"
 	"math/rand"
 )
 
@@ -30,23 +30,37 @@ func (nl *NodeList) FreeSpace() int {
 	return freeSpace
 }
 
-func (nl *NodeList) RandomlyPickN(n int, min int) ([]Node, bool) {
+func (nl *NodeList) RandomlyPickN(count int, minSpace int, firstNodeName string) ([]Node, bool) {
 	var list []Node
+	var preferredNode *Node
+	if firstNodeName != "" {
+		for _, n := range nl.nodes {
+			if n.Id() == NodeId(firstNodeName) && n.FreeSpace() >= minSpace {
+				preferredNode = &n
+				break
+			}
+		}
+		if preferredNode == nil {
+			return list, false
+		}
+	}
+
 	for _, n := range nl.nodes {
-		if n.FreeSpace() >= min {
+		if n.FreeSpace() >= minSpace && n.Id() != NodeId(firstNodeName) {
 			list = append(list, n)
 		}
 	}
-	if n > len(list) {
+	if count > len(list) || count == len(list) && firstNodeName != "" {
 		return nil, false
 	}
-	for i := n; i > 0; i-- {
+	for i := len(list); i > 0; i-- {
 		r := rand.Intn(i)
-		t := list[r]
-		list[r] = list[i-1]
-		list[i-1] = t
+		list[r], list[i-1] = list[i-1], list[r]
 	}
-	return list[len(list)-n:], true
+	if firstNodeName != "" {
+		list[0] = *preferredNode
+	}
+	return list[:count], true
 }
 
 func (nl *NodeList) ReserveOneVolume(randomVolumeIndex int, vid storage.VolumeId) (bool, *DataNode) {
@@ -56,7 +70,7 @@ func (nl *NodeList) ReserveOneVolume(randomVolumeIndex int, vid storage.VolumeId
 			randomVolumeIndex -= freeSpace
 		} else {
 			if node.IsDataNode() && node.FreeSpace() > 0 {
-				fmt.Println("vid =", vid, " assigned to node =", node, ", freeSpace =", node.FreeSpace())
+				glog.V(0).Infoln("vid =", vid, " assigned to node =", node, ", freeSpace =", node.FreeSpace())
 				return true, node.(*DataNode)
 			}
 			children := node.Children()

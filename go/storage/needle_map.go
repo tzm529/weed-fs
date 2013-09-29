@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bufio"
+	"code.google.com/p/weed-fs/go/glog"
 	"code.google.com/p/weed-fs/go/util"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ type NeedleMapper interface {
 	FileCount() int
 	DeletedCount() int
 	Visit(visit func(NeedleValue) error) (err error)
+	NextFileKey(count int) uint64
 }
 
 type mapMetric struct {
@@ -25,6 +27,7 @@ type mapMetric struct {
 	FileCounter         int    `json:"FileCounter"`
 	DeletionByteCounter uint64 `json:"DeletionByteCounter"`
 	FileByteCounter     uint64 `json:"FileByteCounter"`
+	MaximumFileKey      uint64 `json:"MaxFileKey"`
 }
 
 type NeedleMap struct {
@@ -52,37 +55,65 @@ const (
 
 func LoadNeedleMap(file *os.File) (*NeedleMap, error) {
 	nm := NewNeedleMap(file)
-  bufferReader := bufio.NewReaderSize(nm.indexFile, 1024*1024)
-	bytes := make([]byte, 16*RowsToRead)
-	count, e := bufferReader.Read(bytes)
-	for count > 0 && e == nil {
-		for i := 0; i < count; i += 16 {
-			key := util.BytesToUint64(bytes[i : i+8])
-			offset := util.BytesToUint32(bytes[i+8 : i+12])
-			size := util.BytesToUint32(bytes[i+12 : i+16])
-			nm.FileCounter++
-			nm.FileByteCounter = nm.FileByteCounter + uint64(size)
-			if offset > 0 {
-				oldSize := nm.m.Set(Key(key), offset, size)
-				//log.Println("reading key", key, "offset", offset, "size", size, "oldSize", oldSize)
-				if oldSize > 0 {
-					nm.DeletionCounter++
-					nm.DeletionByteCounter = nm.DeletionByteCounter + uint64(oldSize)
-				}
-			} else {
-				oldSize := nm.m.Delete(Key(key))
-				//log.Println("removing key", key, "offset", offset, "size", size, "oldSize", oldSize)
+	e := walkIndexFile(file, func(key uint64, offset, size uint32) error {
+		if key > nm.MaximumFileKey {
+			nm.MaximumFileKey = key
+		}
+		nm.FileCounter++
+		nm.FileByteCounter = nm.FileByteCounter + uint64(size)
+		if offset > 0 {
+			oldSize := nm.m.Set(Key(key), offset, size)
+			glog.V(4).Infoln("reading key", key, "offset", offset, "size", size, "oldSize", oldSize)
+			if oldSize > 0 {
 				nm.DeletionCounter++
 				nm.DeletionByteCounter = nm.DeletionByteCounter + uint64(oldSize)
 			}
+		} else {
+			oldSize := nm.m.Delete(Key(key))
+			glog.V(4).Infoln("removing key", key, "offset", offset, "size", size, "oldSize", oldSize)
+			nm.DeletionCounter++
+			nm.DeletionByteCounter = nm.DeletionByteCounter + uint64(oldSize)
 		}
+		return nil
+	})
+	glog.V(1).Infoln("max file key:", nm.MaximumFileKey)
+	return nm, e
+}
 
-		count, e = bufferReader.Read(bytes)
+// walks through the index file, calls fn function with each key, offset, size
+// stops with the error returned by the fn function
+func walkIndexFile(r io.Reader, fn func(key uint64, offset, size uint32) error) error {
+	br := bufio.NewReaderSize(r, 1024*1024)
+	bytes := make([]byte, 16*RowsToRead)
+	count, e := br.Read(bytes)
+	var (
+		key          uint64
+		offset, size uint32
+		i            int
+	)
+
+	for count > 0 && e == nil {
+		for i = 0; i+16 <= count; i += 16 {
+			key = util.BytesToUint64(bytes[i : i+8])
+			offset = util.BytesToUint32(bytes[i+8 : i+12])
+			size = util.BytesToUint32(bytes[i+12 : i+16])
+			if e = fn(key, offset, size); e != nil {
+				return e
+			}
+		}
+		if count%16 != 0 {
+			copy(bytes[:count-i], bytes[i:count])
+			i = count - i
+			count, e = br.Read(bytes[i:])
+			count += i
+		} else {
+			count, e = br.Read(bytes)
+		}
 	}
 	if e == io.EOF {
-		e = nil
+		return nil
 	}
-	return nm, e
+	return e
 }
 
 func (nm *NeedleMap) Put(key uint64, offset uint32, size uint32) (int, error) {
@@ -138,4 +169,15 @@ func (nm NeedleMap) DeletedCount() int {
 }
 func (nm *NeedleMap) Visit(visit func(NeedleValue) error) (err error) {
 	return nm.m.Visit(visit)
+}
+func (nm NeedleMap) MaxFileKey() uint64 {
+	return nm.MaximumFileKey
+}
+func (nm NeedleMap) NextFileKey(count int) (ret uint64) {
+	if count <= 0 {
+		return 0
+	}
+	ret = nm.MaximumFileKey
+	nm.MaximumFileKey += uint64(count)
+	return
 }

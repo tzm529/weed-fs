@@ -1,11 +1,11 @@
 package topology
 
 import (
+	"code.google.com/p/weed-fs/go/glog"
 	"code.google.com/p/weed-fs/go/sequence"
 	"code.google.com/p/weed-fs/go/storage"
 	"errors"
 	"io/ioutil"
-	"log"
 	"math/rand"
 )
 
@@ -55,7 +55,7 @@ func (t *Topology) loadConfiguration(configurationFile string) error {
 		t.configuration, e = NewConfiguration(b)
 		return e
 	} else {
-		log.Println("Using default configurations.")
+		glog.V(0).Infoln("Using default configurations.")
 	}
 	return nil
 }
@@ -71,25 +71,13 @@ func (t *Topology) Lookup(vid storage.VolumeId) []*DataNode {
 	return nil
 }
 
-func (t *Topology) RandomlyReserveOneVolume() (bool, *DataNode, *storage.VolumeId) {
+func (t *Topology) RandomlyReserveOneVolume(dataCenter string) (bool, *DataNode, *storage.VolumeId) {
 	if t.FreeSpace() <= 0 {
+		glog.V(0).Infoln("Topology does not have free space left!")
 		return false, nil, nil
 	}
 	vid := t.NextVolumeId()
-	ret, node := t.ReserveOneVolume(rand.Intn(t.FreeSpace()), vid)
-	return ret, node, &vid
-}
-
-func (t *Topology) RandomlyReserveOneVolumeExcept(except []Node) (bool, *DataNode, *storage.VolumeId) {
-	freeSpace := t.FreeSpace()
-	for _, node := range except {
-		freeSpace -= node.FreeSpace()
-	}
-	if freeSpace <= 0 {
-		return false, nil, nil
-	}
-	vid := t.NextVolumeId()
-	ret, node := t.ReserveOneVolume(rand.Intn(freeSpace), vid)
+	ret, node := t.ReserveOneVolume(rand.Intn(t.FreeSpace()), vid, dataCenter)
 	return ret, node, &vid
 }
 
@@ -98,12 +86,12 @@ func (t *Topology) NextVolumeId() storage.VolumeId {
 	return vid.Next()
 }
 
-func (t *Topology) PickForWrite(repType storage.ReplicationType, count int) (string, int, *DataNode, error) {
+func (t *Topology) PickForWrite(repType storage.ReplicationType, count int, dataCenter string) (string, int, *DataNode, error) {
 	replicationTypeIndex := repType.GetReplicationLevelIndex()
 	if t.replicaType2VolumeLayout[replicationTypeIndex] == nil {
 		t.replicaType2VolumeLayout[replicationTypeIndex] = NewVolumeLayout(repType, t.volumeSizeLimit, t.pulse)
 	}
-	vid, count, datanodes, err := t.replicaType2VolumeLayout[replicationTypeIndex].PickForWrite(count)
+	vid, count, datanodes, err := t.replicaType2VolumeLayout[replicationTypeIndex].PickForWrite(count, dataCenter)
 	if err != nil || datanodes.Length() == 0 {
 		return "", 0, nil, errors.New("No writable volumes avalable!")
 	}
@@ -114,6 +102,7 @@ func (t *Topology) PickForWrite(repType storage.ReplicationType, count int) (str
 func (t *Topology) GetVolumeLayout(repType storage.ReplicationType) *VolumeLayout {
 	replicationTypeIndex := repType.GetReplicationLevelIndex()
 	if t.replicaType2VolumeLayout[replicationTypeIndex] == nil {
+		glog.V(0).Infoln("adding replication type", repType)
 		t.replicaType2VolumeLayout[replicationTypeIndex] = NewVolumeLayout(repType, t.volumeSizeLimit, t.pulse)
 	}
 	return t.replicaType2VolumeLayout[replicationTypeIndex]
@@ -123,8 +112,8 @@ func (t *Topology) RegisterVolumeLayout(v *storage.VolumeInfo, dn *DataNode) {
 	t.GetVolumeLayout(v.RepType).RegisterVolume(v, dn)
 }
 
-func (t *Topology) RegisterVolumes(init bool, volumeInfos []storage.VolumeInfo, ip string, port int, publicUrl string, maxVolumeCount int) {
-	dcName, rackName := t.configuration.Locate(ip)
+func (t *Topology) RegisterVolumes(init bool, volumeInfos []storage.VolumeInfo, ip string, port int, publicUrl string, maxVolumeCount int, dcName string, rackName string) {
+	dcName, rackName = t.configuration.Locate(ip, dcName, rackName)
 	dc := t.GetOrCreateDataCenter(dcName)
 	rack := dc.GetOrCreateRack(rackName)
 	dn := rack.FindDataNode(ip, port)

@@ -2,9 +2,9 @@ package replication
 
 import (
 	"bytes"
+	"code.google.com/p/weed-fs/go/glog"
 	"code.google.com/p/weed-fs/go/operation"
-  "code.google.com/p/weed-fs/go/storage"
-	"log"
+	"code.google.com/p/weed-fs/go/storage"
 	"net/http"
 	"strconv"
 )
@@ -23,9 +23,9 @@ func ReplicatedWrite(masterNode string, s *storage.Store, volumeId storage.Volum
 		needToReplicate = s.GetVolume(volumeId).NeedToReplicate()
 	}
 	if needToReplicate { //send to other replica locations
-		if r.FormValue("type") != "standard" {
+		if r.FormValue("type") != "replicate" {
 			if !distributedOperation(masterNode, s, volumeId, func(location operation.Location) bool {
-				_, err := operation.Upload("http://"+location.Url+r.URL.Path+"?type=standard", string(needle.Name), bytes.NewReader(needle.Data))
+				_, err := operation.Upload("http://"+location.Url+r.URL.Path+"?type=replicate&ts="+strconv.FormatUint(needle.LastModified, 10), string(needle.Name), bytes.NewReader(needle.Data), needle.IsGzipped(), string(needle.Mime))
 				return err == nil
 			}) {
 				ret = 0
@@ -39,7 +39,7 @@ func ReplicatedWrite(masterNode string, s *storage.Store, volumeId storage.Volum
 				volumeId.String() + ": " + err.Error()
 		} else {
 			distributedOperation(masterNode, s, volumeId, func(location operation.Location) bool {
-				return nil == operation.Delete("http://"+location.Url+r.URL.Path+"?type=standard")
+				return nil == operation.Delete("http://"+location.Url+r.URL.Path+"?type=replicate")
 			})
 		}
 	}
@@ -50,7 +50,7 @@ func ReplicatedWrite(masterNode string, s *storage.Store, volumeId storage.Volum
 func ReplicatedDelete(masterNode string, store *storage.Store, volumeId storage.VolumeId, n *storage.Needle, r *http.Request) (ret uint32) {
 	ret, err := store.Delete(volumeId, n)
 	if err != nil {
-		log.Println("delete error:", err)
+		glog.V(0).Infoln("delete error:", err)
 		return
 	}
 
@@ -59,9 +59,9 @@ func ReplicatedDelete(masterNode string, store *storage.Store, volumeId storage.
 		needToReplicate = store.GetVolume(volumeId).NeedToReplicate()
 	}
 	if needToReplicate { //send to other replica locations
-		if r.FormValue("type") != "standard" {
+		if r.FormValue("type") != "replicate" {
 			if !distributedOperation(masterNode, store, volumeId, func(location operation.Location) bool {
-				return nil == operation.Delete("http://"+location.Url+r.URL.Path+"?type=standard")
+				return nil == operation.Delete("http://"+location.Url+r.URL.Path+"?type=replicate")
 			}) {
 				ret = 0
 			}
@@ -89,7 +89,7 @@ func distributedOperation(masterNode string, store *storage.Store, volumeId stor
 		}
 		return ret
 	} else {
-		log.Println("Failed to lookup for", volumeId, lookupErr.Error())
+		glog.V(0).Infoln("Failed to lookup for", volumeId, lookupErr.Error())
 	}
 	return false
 }

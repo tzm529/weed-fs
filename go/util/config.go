@@ -10,8 +10,8 @@ package util
 
 import (
 	"bytes"
+	"code.google.com/p/weed-fs/go/glog"
 	"encoding/json"
-	"log"
 	"os"
 )
 
@@ -32,7 +32,7 @@ func LoadConfig(filename string) *Config {
 	result.filename = filename
 	err := result.parse()
 	if err != nil {
-		log.Fatalf("error loading config file %s: %s", filename, err)
+		glog.Fatalf("error loading config file %s: %s", filename, err)
 	}
 	return result
 }
@@ -42,7 +42,7 @@ func LoadConfigString(s string) *Config {
 	result := newConfig()
 	err := json.Unmarshal([]byte(s), &result.data)
 	if err != nil {
-		log.Fatalf("error parsing config string %s: %s", s, err)
+		glog.Fatalf("error parsing config string %s: %s", s, err)
 	}
 	return result
 }

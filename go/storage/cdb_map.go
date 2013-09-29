@@ -76,6 +76,9 @@ func (m cdbMap) FileCount() int {
 func (m *cdbMap) DeletedCount() int {
 	return m.DeletionCounter
 }
+func (m *cdbMap) NextFileKey(count int) (uint64) {
+  return 0
+}
 
 func getMetric(c *cdb.Cdb, m *mapMetric) error {
 	data, err := c.Data([]byte{'M'})
@@ -206,12 +209,12 @@ func DumpNeedleMapToCdb(cdbName string, nm *NeedleMap) error {
 func openTempCdb(fileName string) (cdb.AdderFunc, cdb.CloserFunc, error) {
 	fh, err := os.Create(fileName)
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot create cdb file %s: %s", fileName, err)
+		return nil, nil, fmt.Errorf("cannot create cdb file %s: %s", fileName, err.Error())
 	}
 	adder, closer, err := cdb.MakeFactory(fh)
 	if err != nil {
 		fh.Close()
-		return nil, nil, fmt.Errorf("error creating factory: %s", err)
+		return nil, nil, fmt.Errorf("error creating factory: %s", err.Error())
 	}
 	return adder, func() error {
 		if e := closer(); e != nil {

@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"code.google.com/p/weed-fs/go/glog"
+	"code.google.com/p/weed-fs/go/operation"
 	"code.google.com/p/weed-fs/go/replication"
 	"code.google.com/p/weed-fs/go/storage"
 	"code.google.com/p/weed-fs/go/topology"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -29,15 +32,18 @@ var cmdMaster = &Command{
 }
 
 var (
-	mport             = cmdMaster.Flag.Int("port", 9333, "http listen port")
-	metaFolder        = cmdMaster.Flag.String("mdir", "/tmp", "data directory to store mappings")
-	volumeSizeLimitMB = cmdMaster.Flag.Uint("volumeSizeLimitMB", 32*1024, "Default Volume Size in MegaBytes")
-	mpulse            = cmdMaster.Flag.Int("pulseSeconds", 5, "number of seconds between heartbeats")
-	confFile          = cmdMaster.Flag.String("conf", "/etc/weedfs/weedfs.conf", "xml configuration file")
-	defaultRepType    = cmdMaster.Flag.String("defaultReplicationType", "000", "Default replication type if not specified.")
-	mReadTimeout      = cmdMaster.Flag.Int("readTimeout", 3, "connection read timeout in seconds")
-	mMaxCpu           = cmdMaster.Flag.Int("maxCpu", 0, "maximum number of CPUs. 0 means all available CPUs")
-	garbageThreshold  = cmdMaster.Flag.String("garbageThreshold", "0.3", "threshold to vacuum and reclaim spaces")
+	mport                 = cmdMaster.Flag.Int("port", 9333, "http listen port")
+	metaFolder            = cmdMaster.Flag.String("mdir", os.TempDir(), "data directory to store mappings")
+	volumeSizeLimitMB     = cmdMaster.Flag.Uint("volumeSizeLimitMB", 32*1024, "Default Volume Size in MegaBytes")
+	mpulse                = cmdMaster.Flag.Int("pulseSeconds", 5, "number of seconds between heartbeats")
+	confFile              = cmdMaster.Flag.String("conf", "/etc/weedfs/weedfs.conf", "xml configuration file")
+	defaultRepType        = cmdMaster.Flag.String("defaultReplicationType", "000", "Default replication type if not specified.")
+	mReadTimeout          = cmdMaster.Flag.Int("readTimeout", 3, "connection read timeout in seconds")
+	mMaxCpu               = cmdMaster.Flag.Int("maxCpu", 0, "maximum number of CPUs. 0 means all available CPUs")
+	garbageThreshold      = cmdMaster.Flag.String("garbageThreshold", "0.3", "threshold to vacuum and reclaim spaces")
+	masterWhiteListOption = cmdMaster.Flag.String("whiteList", "", "comma separated Ip addresses having write permission. No limit if empty.")
+
+	masterWhiteList []string
 )
 
 var topo *topology.Topology
@@ -77,25 +83,27 @@ func dirAssignHandler(w http.ResponseWriter, r *http.Request) {
 	if repType == "" {
 		repType = *defaultRepType
 	}
+	dataCenter := r.FormValue("dataCenter")
 	rt, err := storage.NewReplicationTypeFromString(repType)
 	if err != nil {
 		w.WriteHeader(http.StatusNotAcceptable)
 		writeJsonQuiet(w, r, map[string]string{"error": err.Error()})
 		return
 	}
-	if topo.GetVolumeLayout(rt).GetActiveVolumeCount() <= 0 {
+
+	if topo.GetVolumeLayout(rt).GetActiveVolumeCount(dataCenter) <= 0 {
 		if topo.FreeSpace() <= 0 {
 			w.WriteHeader(http.StatusNotFound)
 			writeJsonQuiet(w, r, map[string]string{"error": "No free volumes left!"})
 			return
 		} else {
-			if _, err = vg.GrowByType(rt, topo); err != nil {
+			if _, err = vg.AutomaticGrowByType(rt, dataCenter, topo); err != nil {
 				writeJsonQuiet(w, r, map[string]string{"error": "Cannot grow volume group! " + err.Error()})
 				return
 			}
 		}
 	}
-	fid, count, dn, err := topo.PickForWrite(rt, c)
+	fid, count, dn, err := topo.PickForWrite(rt, c, dataCenter)
 	if err == nil {
 		writeJsonQuiet(w, r, map[string]interface{}{"fid": fid, "url": dn.Url(), "publicUrl": dn.PublicUrl, "count": count})
 	} else {
@@ -120,7 +128,7 @@ func dirJoinHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	debug(s, "volumes", r.FormValue("volumes"))
-	topo.RegisterVolumes(init, *volumes, ip, port, publicUrl, maxVolumeCount)
+	topo.RegisterVolumes(init, *volumes, ip, port, publicUrl, maxVolumeCount, r.FormValue("dataCenter"), r.FormValue("rack"))
 	m := make(map[string]interface{})
 	m["VolumeSizeLimit"] = uint64(*volumeSizeLimitMB) * 1024 * 1024
 	writeJsonQuiet(w, r, m)
@@ -151,7 +159,7 @@ func volumeGrowHandler(w http.ResponseWriter, r *http.Request) {
 			if topo.FreeSpace() < count*rt.GetCopyCount() {
 				err = errors.New("Only " + strconv.Itoa(topo.FreeSpace()) + " volumes left! Not enough for " + strconv.Itoa(count*rt.GetCopyCount()))
 			} else {
-				count, err = vg.GrowByCountAndType(count, rt, topo)
+				count, err = vg.GrowByCountAndType(count, rt, r.FormValue("dataCneter"), topo)
 			}
 		} else {
 			err = errors.New("parameter count is not found")
@@ -174,7 +182,7 @@ func volumeStatusHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func redirectHandler(w http.ResponseWriter, r *http.Request) {
-	vid, _, _ := parseURLPath(r.URL.Path)
+	vid, _, _, _, _ := parseURLPath(r.URL.Path)
 	volumeId, err := storage.NewVolumeId(vid)
 	if err != nil {
 		debug("parsing error:", err, r.URL.Path)
@@ -189,31 +197,39 @@ func redirectHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func submitFromMasterServerHandler(w http.ResponseWriter, r *http.Request) {
+	submitForClientHandler(w, r, "localhost:"+strconv.Itoa(*mport))
+}
+
 func runMaster(cmd *Command, args []string) bool {
 	if *mMaxCpu < 1 {
 		*mMaxCpu = runtime.NumCPU()
 	}
 	runtime.GOMAXPROCS(*mMaxCpu)
+	if *masterWhiteListOption != "" {
+		masterWhiteList = strings.Split(*masterWhiteListOption, ",")
+	}
 	var e error
 	if topo, e = topology.NewTopology("topo", *confFile, *metaFolder, "weed",
 		uint64(*volumeSizeLimitMB)*1024*1024, *mpulse); e != nil {
-		log.Fatalf("cannot create topology:%s", e)
+		glog.Fatalf("cannot create topology:%s", e)
 	}
 	vg = replication.NewDefaultVolumeGrowth()
-	log.Println("Volume Size Limit is", *volumeSizeLimitMB, "MB")
-	http.HandleFunc("/dir/assign", dirAssignHandler)
-	http.HandleFunc("/dir/lookup", dirLookupHandler)
-	http.HandleFunc("/dir/join", dirJoinHandler)
-	http.HandleFunc("/dir/status", dirStatusHandler)
-	http.HandleFunc("/vol/grow", volumeGrowHandler)
-	http.HandleFunc("/vol/status", volumeStatusHandler)
-	http.HandleFunc("/vol/vacuum", volumeVacuumHandler)
+	glog.V(0).Infoln("Volume Size Limit is", *volumeSizeLimitMB, "MB")
+	http.HandleFunc("/dir/assign", secure(masterWhiteList, dirAssignHandler))
+	http.HandleFunc("/dir/lookup", secure(masterWhiteList, dirLookupHandler))
+	http.HandleFunc("/dir/join", secure(masterWhiteList, dirJoinHandler))
+	http.HandleFunc("/dir/status", secure(masterWhiteList, dirStatusHandler))
+	http.HandleFunc("/vol/grow", secure(masterWhiteList, volumeGrowHandler))
+	http.HandleFunc("/vol/status", secure(masterWhiteList, volumeStatusHandler))
+	http.HandleFunc("/vol/vacuum", secure(masterWhiteList, volumeVacuumHandler))
 
+	http.HandleFunc("/submit", secure(masterWhiteList, submitFromMasterServerHandler))
 	http.HandleFunc("/", redirectHandler)
 
 	topo.StartRefreshWritableVolumes(*garbageThreshold)
 
-	log.Println("Start Weed Master", VERSION, "at port", strconv.Itoa(*mport))
+	glog.V(0).Infoln("Start Weed Master", VERSION, "at port", strconv.Itoa(*mport))
 	srv := &http.Server{
 		Addr:        ":" + strconv.Itoa(*mport),
 		Handler:     http.DefaultServeMux,
@@ -221,7 +237,49 @@ func runMaster(cmd *Command, args []string) bool {
 	}
 	e = srv.ListenAndServe()
 	if e != nil {
-		log.Fatalf("Fail to start:%s", e)
+		glog.Fatalf("Fail to start:%s", e)
 	}
 	return true
+}
+
+func submitForClientHandler(w http.ResponseWriter, r *http.Request, masterUrl string) {
+	m := make(map[string]interface{})
+	if r.Method != "POST" {
+		m["error"] = "Only submit via POST!"
+		writeJsonQuiet(w, r, m)
+		return
+	}
+
+	debug("parsing upload file...")
+	fname, data, mimeType, isGzipped, lastModified, pe := storage.ParseUpload(r)
+	if pe != nil {
+		writeJsonError(w, r, pe)
+		return
+	}
+
+	debug("assigning file id for", fname)
+	assignResult, ae := operation.Assign(masterUrl, 1, r.FormValue("replication"))
+	if ae != nil {
+		writeJsonError(w, r, ae)
+		return
+	}
+
+	url := "http://" + assignResult.PublicUrl + "/" + assignResult.Fid
+	if lastModified != 0 {
+		url = url + "?ts=" + strconv.FormatUint(lastModified, 10)
+	}
+
+	debug("upload file to store", url)
+	uploadResult, err := operation.Upload(url, fname, bytes.NewReader(data), isGzipped, mimeType)
+	if err != nil {
+		writeJsonError(w, r, err)
+		return
+	}
+
+	m["fileName"] = fname
+	m["fid"] = assignResult.Fid
+	m["fileUrl"] = assignResult.PublicUrl + "/" + assignResult.Fid
+	m["size"] = uploadResult.Size
+	writeJsonQuiet(w, r, m)
+	return
 }

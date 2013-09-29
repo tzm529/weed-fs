@@ -1,8 +1,8 @@
 package storage
 
 import (
+	"code.google.com/p/weed-fs/go/glog"
 	"code.google.com/p/weed-fs/go/util"
-	"log"
 	"os"
 	"testing"
 )
@@ -23,7 +23,7 @@ func LoadNewNeedleMap(file *os.File) CompactMap {
 	count, e := file.Read(bytes)
 	if count > 0 {
 		fstat, _ := file.Stat()
-		log.Println("Loading index file", fstat.Name(), "size", fstat.Size())
+		glog.V(0).Infoln("Loading index file", fstat.Name(), "size", fstat.Size())
 	}
 	for count > 0 && e == nil {
 		for i := 0; i < count; i += 16 {
